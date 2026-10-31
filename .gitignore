@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Raw dataset (link the Kaggle page in the README instead)
+city_day.csv
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Local outputs
+results_table.csv
+*.log
