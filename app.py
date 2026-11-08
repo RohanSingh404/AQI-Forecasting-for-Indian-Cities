@@ -69,3 +69,24 @@ st.dataframe(fc.assign(Date=fc["Date"].dt.strftime("%a %d %b")), hide_index=True
 
 st.info("Forecast error grows with horizon (about R² 0.9 at 1 day, about 0.6 at 3 to 7 days). "
         "Jaipur and Kolkata have shorter training history.")
+
+st.subheader("Backtest: forecast vs actual (Jan to Jul 2020)")
+hz = st.selectbox("Horizon (days ahead)", list(range(1, 8)), index=2)
+t = valid[valid["Date"] >= "2020-01-01"].copy()
+t["Pred"] = np.clip(t["AQI"] + bundle["holdout"][hz].predict(t[feats].astype(float)), 0, 500)
+t["Target_date"] = t["Date"] + pd.Timedelta(days=hz)
+t["Actual"] = t["Target_date"].map(series)
+t = t.dropna(subset=["Actual"])
+
+if len(t) > 5:
+    fig3, ax3 = plt.subplots(figsize=(10, 3.5))
+    ax3.plot(t["Target_date"], t["Actual"], label="Actual")
+    ax3.plot(t["Target_date"], t["Pred"], color="crimson", label=f"Forecast ({hz} days ahead)")
+    ax3.set_ylabel("AQI"); ax3.legend(); ax3.grid(alpha=0.2)
+    st.pyplot(fig3)
+    a, p = t["Actual"], t["Pred"]
+    m1, m2 = st.columns(2)
+    m1.metric("MAE", f"{(a - p).abs().mean():.1f}")
+    m2.metric("R²", f"{1 - ((a - p) ** 2).sum() / ((a - a.mean()) ** 2).sum():.2f}")
+else:
+    st.info("Not enough 2020 data for this city.")
