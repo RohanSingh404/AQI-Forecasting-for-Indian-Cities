@@ -12,6 +12,53 @@ CATS = [
     (500, "Severe",       "#7b1fa2", "Health emergency. Stay indoors and use an air purifier if possible."),
 ]
 
+
+
+
+BP = {
+ "PM2.5": [(0,30,0,50),(30,60,50,100),(60,90,100,200),(90,120,200,300),(120,250,300,400),(250,380,400,500)],
+ "PM10":  [(0,50,0,50),(50,100,50,100),(100,250,100,200),(250,350,200,300),(350,430,300,400),(430,510,400,500)],
+ "NO2":   [(0,40,0,50),(40,80,50,100),(80,180,100,200),(180,280,200,300),(280,400,300,400),(400,500,400,500)],
+ "SO2":   [(0,40,0,50),(40,80,50,100),(80,380,100,200),(380,800,200,300),(800,1600,300,400),(1600,2000,400,500)],
+ "CO":    [(0,1,0,50),(1,2,50,100),(2,10,100,200),(10,17,200,300),(17,34,300,400),(34,50,400,500)],
+ "O3":    [(0,50,0,50),(50,100,50,100),(100,168,100,200),(168,208,200,300),(208,748,300,400),(748,1000,400,500)],
+ "NH3":   [(0,200,0,50),(200,400,50,100),(400,800,100,200),(800,1200,200,300),(1200,1800,300,400),(1800,2400,400,500)],
+}
+NAMES = {"PM2.5":"PM2.5","PM10":"PM10","NO2":"NO₂","SO2":"SO₂","CO":"CO","O3":"O₃","NH3":"NH₃"}
+
+def sub_index(x, bands):
+    if pd.isna(x):
+        return np.nan
+    for clo, chi, ilo, ihi in bands:
+        if x <= chi:
+            return ilo + (max(x, clo) - clo) * (ihi - ilo) / (chi - clo)
+    return 500.0
+
+r = row.iloc[0]
+sub = pd.Series({p: sub_index(r[p], BP[p]) for p in BP}).dropna().sort_values(ascending=False)
+main = sub.index[0]
+
+st.subheader(f"What is driving AQI on {sel:%d %b %Y}")
+fig2, ax2 = plt.subplots(figsize=(8, 3))
+order = list(sub.index)[::-1]
+ax2.barh([NAMES[p] for p in order], [sub[p] for p in order],
+         color=["crimson" if p == main else "lightgray" for p in order])
+ax2.set_xlabel("Estimated sub-index (highest one sets the AQI)")
+st.pyplot(fig2)
+
+others = ", ".join(NAMES[p] for p in sub.index[1:])
+st.markdown(f"**Main driver: {NAMES[main]}** (sub-index about {sub.iloc[0]:.0f}, "
+            f"{categorize(sub.iloc[0])[0]}). Also considered: {others}.")
+missing = [NAMES[p] for p in BP if pd.isna(r[p])]
+if missing:
+    st.caption("Not recorded on this day: " + ", ".join(missing))
+st.caption("Estimated from the day's concentrations with CPCB breakpoints. The forecast covers overall AQI; "
+           "this chart explains the observed day, not the forecast days.")
+
+
+
+
+
 def categorize(a):
     for hi, name, color, advice in CATS:
         if a <= hi:
