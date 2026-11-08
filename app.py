@@ -1,3 +1,4 @@
+import os
 import streamlit as st, pandas as pd, numpy as np, joblib
 import matplotlib.pyplot as plt
 
@@ -46,19 +47,32 @@ def load_models():
 def load_data():
     fe = pd.read_csv("artifacts/features.csv", parse_dates=["Date"])
     hist = pd.read_csv("artifacts/history.csv", parse_dates=["Date"])
+    extra_path = "artifacts/actuals_extra.csv"
+    if os.path.exists(extra_path):
+        extra = pd.read_csv(extra_path, parse_dates=["Date"])[["City", "Date", "AQI"]]
+        hist = pd.concat([hist, extra], ignore_index=True)
+    hist = hist.drop_duplicates(subset=["City", "Date"], keep="last")
     return fe, hist
 
 bundle = load_models()
 feats = bundle["feats"]
+holdout = bundle.get("holdout")
 fe, hist = load_data()
 
 st.title("India AQI Forecast")
-st.caption("Pick a city and a start date to see the next 7 days of forecast AQI with health advice.")
+st.caption("Pick a city and a start date. The table compares the 7-day forecast with what actually happened.")
 
 city = st.sidebar.selectbox("City", sorted(fe["City"].unique()))
 valid = fe[fe["City"] == city].dropna(subset=["AQI_lag14", "AQI_roll30"])
+series = hist[hist["City"] == city].set_index("Date")["AQI"]
 dmin, dmax = valid["Date"].min(), valid["Date"].max()
-sel = st.sidebar.date_input("Forecast from (date)", value=dmax.date(),
+
+# default date: the latest date if actuals exist after it, otherwise 30 days earlier
+if series.index.max() > dmax:
+    default = dmax
+else:
+    default = valid["Date"].iloc[-30] if len(valid) > 30 else dmax
+sel = st.sidebar.date_input("Forecast from (date)", value=default.date(),
                             min_value=dmin.date(), max_value=dmax.date())
 sel = pd.Timestamp(sel)
 
@@ -68,23 +82,22 @@ if row.empty:
     st.stop()
 
 live = sel == dmax
-models = bundle["models"] if live else bundle["holdout"]
+use_main = live or holdout is None
+models = bundle["models"] if use_main else holdout
 X = row[feats].astype(float)
 base = float(row["AQI"].iloc[0])
 
 preds = [float(np.clip(base + models[h].predict(X)[0], 0, 500)) for h in range(1, 8)]
 dates = pd.date_range(sel + pd.Timedelta(days=1), periods=7)
 fc = pd.DataFrame({"Date": dates, "Forecast": np.round(preds).astype(int)})
-fc["Category"] = fc["Forecast"].apply(lambda a: categorize(a)[0])
-series = hist[hist["City"] == city].set_index("Date")["AQI"]
 fc["Actual"] = fc["Date"].map(series)
 
 if live:
-    st.info("Latest date in the dataset (1 Jul 2020): this is a true forecast, so there are no actual values yet.")
-elif sel <= TRAIN_END:
-    st.warning("This date falls in the model's training period, so the forecast is in-sample and looks better than it would on new data.")
+    st.info("This is the last date in the dataset. Actual values appear only if you added them in artifacts/actuals_extra.csv.")
+elif holdout is None or sel <= TRAIN_END:
+    st.warning("The model saw this period during training, so the forecast looks better than it would on new data.")
 else:
-    st.success("This date is after the training period (Dec 2019), so the forecast is out-of-sample.")
+    st.success("This date is after the training period (Dec 2019), so the forecast is a fair test on unseen data.")
 
 c1, c2, c3 = st.columns(3)
 c1.metric(f"Observed on {sel:%d %b %Y}", int(base))
@@ -94,6 +107,58 @@ c3.metric("Day 7 (forecast)", int(fc["Forecast"][6]))
 name, color, advice = categorize(fc["Forecast"][0])
 st.markdown(f"<div style='padding:14px;border-radius:8px;background:{color};color:white'>"
             f"<b>Next day: {name}</b><br>{advice}</div>", unsafe_allow_html=True)
+
+# ---- 7-day table: forecast vs actual ----
+st.subheader("7-day forecast vs actual")
+have = fc.dropna(subset=["Actual"]).copy()
+disp = pd.DataFrame({
+    "Date": fc["Date"].dt.strftime("%a %d %b %Y"),
+    "Forecast AQI": fc["Forecast"],
+    "Forecast category": fc["Forecast"].apply(lambda a: categorize(a)[0]),
+    "Actual AQI": [str(int(round(a))) if pd.notna(a) else "not available" for a in fc["Actual"]],
+    "Actual category": [categorize(a)[0] if pd.notna(a) else "-" for a in fc["Actual"]],
+    "Difference (forecast - actual)": [f"{int(f) - int(round(a)):+d}" if pd.notna(a) else "-"
+                                       for f, a in zip(fc["Forecast"], fc["Actual"])],
+})
+st.dataframe(disp, hide_index=True, use_container_width=True)
+
+# ---- summary ----
+st.subheader("Summary")
+if have.empty:
+    st.info("No actual values exist for these 7 days in the data, so there is nothing to compare yet. "
+            "Pick an earlier date to see the comparison.")
+else:
+    diff = have["Forecast"] - have["Actual"]
+    n = len(have)
+    mae = diff.abs().mean()
+    worst = diff.abs().idxmax()
+    match = sum(categorize(f)[0] == categorize(a)[0] for f, a in zip(have["Forecast"], have["Actual"]))
+    bias = diff.mean()
+    lean = "higher" if bias > 0 else "lower"
+    st.markdown(
+        f"- Over **{n} day(s)** with actual data, the model forecast an average AQI of **{have['Forecast'].mean():.0f}**, "
+        f"while the actual average was **{have['Actual'].mean():.0f}**.\n"
+        f"- On average the forecast was off by **{mae:.1f} AQI points**"
+        f"{f' and leaned {lean} than actual by {abs(bias):.1f}' if abs(bias) >= 1 else ''}.\n"
+        f"- The biggest miss was on **{have.loc[worst, 'Date']:%d %b %Y}**: forecast {int(have.loc[worst, 'Forecast'])} "
+        f"vs actual {int(round(have.loc[worst, 'Actual']))}.\n"
+        f"- The forecast category matched the actual category on **{match} of {n}** day(s)."
+    )
+
+# ---- forecast chart ----
+past = series[(series.index > sel - pd.Timedelta(days=90)) & (series.index <= sel)]
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(past.index, past.values, label="Observed (previous 90 days)")
+ax.plot(fc["Date"], fc["Forecast"], "o--", color="crimson", label="Forecast")
+if not have.empty:
+    ax.plot(have["Date"], have["Actual"], "s-", color="green", label="Actual")
+for hi, _, col, _ in CATS:
+    ax.axhline(hi, color=col, alpha=0.25, lw=1)
+top = max(150, past.max() if len(past) else 0, fc["Forecast"].max(),
+          have["Actual"].max() if not have.empty else 0)
+ax.set_ylim(0, top * 1.15)
+ax.set_ylabel("AQI"); ax.legend(); ax.grid(alpha=0.2)
+st.pyplot(fig)
 
 # ---- main pollutant driver (observed day) ----
 r = row.iloc[0]
@@ -113,60 +178,10 @@ if len(sub):
     missing = [NAMES[p] for p in BP if pd.isna(r[p])]
     if missing:
         st.caption("Not recorded on this day: " + ", ".join(missing))
-    st.caption("Estimated from the day's concentrations with CPCB breakpoints. The forecast covers overall AQI; "
-               "this chart explains the observed day, not the forecast days.")
+    st.caption("Estimated from the day's concentrations with CPCB breakpoints. "
+               "This explains the observed day, not the forecast days.")
 else:
     st.info("No pollutant readings on this day.")
-
-# ---- forecast chart ----
-past = series[(series.index > sel - pd.Timedelta(days=90)) & (series.index <= sel)]
-have = fc.dropna(subset=["Actual"])
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(past.index, past.values, label="Observed (previous 90 days)")
-ax.plot(fc["Date"], fc["Forecast"], "o--", color="crimson", label="Forecast")
-if not have.empty:
-    ax.plot(have["Date"], have["Actual"], "s-", color="green", label="Actual")
-for hi, _, col, _ in CATS:
-    ax.axhline(hi, color=col, alpha=0.25, lw=1)
-top = max(150, past.max() if len(past) else 0, fc["Forecast"].max(),
-          have["Actual"].max() if not have.empty else 0)
-ax.set_ylim(0, top * 1.15)
-ax.set_ylabel("AQI"); ax.legend(); ax.grid(alpha=0.2)
-st.pyplot(fig)
-
-if not have.empty:
-    mae = (have["Forecast"] - have["Actual"]).abs().mean()
-    st.metric(f"Mean absolute error over {len(have)} day(s) with actual data", f"{mae:.1f} AQI points")
-
-show = fc.assign(Date=fc["Date"].dt.strftime("%a %d %b %Y"))
-if show["Actual"].notna().any():
-    show["Actual"] = show["Actual"].round(0).astype("Int64")
-    show["Error"] = (show["Forecast"] - show["Actual"]).astype("Int64")
-else:
-    show = show.drop(columns=["Actual"])
-st.subheader("7-day forecast")
-st.dataframe(show, hide_index=True, use_container_width=True)
-
-# ---- backtest ----
-st.subheader("Backtest: forecast vs actual (Jan to Jul 2020)")
-hz = st.selectbox("Horizon (days ahead)", list(range(1, 8)), index=2)
-t = valid[valid["Date"] >= "2020-01-01"].copy()
-t["Pred"] = np.clip(t["AQI"] + bundle["holdout"][hz].predict(t[feats].astype(float)), 0, 500)
-t["Target_date"] = t["Date"] + pd.Timedelta(days=hz)
-t["Actual"] = t["Target_date"].map(series)
-t = t.dropna(subset=["Actual"])
-if len(t) > 5:
-    fig3, ax3 = plt.subplots(figsize=(10, 3.5))
-    ax3.plot(t["Target_date"], t["Actual"], label="Actual")
-    ax3.plot(t["Target_date"], t["Pred"], color="crimson", label=f"Forecast ({hz} days ahead)")
-    ax3.set_ylabel("AQI"); ax3.legend(); ax3.grid(alpha=0.2)
-    st.pyplot(fig3)
-    a, p = t["Actual"], t["Pred"]
-    m1, m2 = st.columns(2)
-    m1.metric("MAE", f"{(a - p).abs().mean():.1f}")
-    m2.metric("R²", f"{1 - ((a - p) ** 2).sum() / ((a - a.mean()) ** 2).sum():.2f}")
-else:
-    st.info("Not enough 2020 data for this city.")
 
 st.info("Forecast error grows with horizon (about R² 0.9 at 1 day, about 0.6 at 3 to 7 days, pre-lockdown). "
         "Jaipur and Kolkata have shorter training history.")
